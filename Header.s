@@ -79,6 +79,15 @@ RIGHT_N = 1
 BOTTOM_N = 2
 LEFT_N = 3
 
+; directions for solving algo 
+TOP_D = 0
+RIGHT_D = 1
+BOTTOM_D = 2
+LEFT_D = 3
+
+
+
+
 ;changed tiles util
 CHANGED_TILES_BUFFER_SIZE = 40
 
@@ -196,6 +205,15 @@ score_low:              .res 1
 score_high:             .res 1
 
 testvar:                .res 1
+
+;SOLVING ALGORITHM VARIABLES
+solving_row:            .res 1
+solving_collumn:        .res 1
+temp_solving_collumn:    .res 1
+temp_solving_row:        .res 1
+solving_local_direction:.res 1
+
+
 ;*****************************************************************
 
 .segment "OAM"

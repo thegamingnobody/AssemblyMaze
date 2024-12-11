@@ -93,13 +93,6 @@ irq:
     mainloop:
         INC RandomSeed 
 
-        ; once per frame: 
-        LDA checked_this_frame
-        CMP #0
-        BEQ :+
-            JSR poll_clear_buffer
-        :
-        
         ;only when not generating 
         LDA has_generation_started
         BNE :++
@@ -110,11 +103,11 @@ irq:
             ; LDA #1
             ; STA has_generation_started
 
+
             ;once per frame
             LDA checked_this_frame
             CMP #1
             BEQ mainloop
-                JSR update_player_sprite
 
                 LDA is_hard_mode
                 CMP #0
@@ -122,7 +115,11 @@ irq:
                     JSR update_visibility
                 :   
 
-                add_to_changed_tiles_buffer #0, #0, #1
+                JSR poll_clear_buffer
+
+                ;JSR update_player_sprite
+                jsr left_hand_rule
+
 
                 LDA frame_counter ;sets last frame ct to the same as frame counter
                 LDA #1
@@ -246,6 +243,12 @@ irq:
     
  ;   add_score #$FF
     add_score #10
+
+    ;init solving direction
+    lda #BOTTOM_D
+    sta solving_local_direction ; start facing down
+
+
 
     RTS
 .endproc
@@ -643,12 +646,14 @@ loop:
     add_to_changed_tiles_buffer #0, temp, #1
     LDA #0
     STA player_row
+    sta solving_row ; make sure solver starts at the beginning of the maze
     LDA temp
-    STA player_collumn
+    STA player_collumn ;
 
     LDA #0
     STA player_y
     LDA player_collumn
+    sta solving_collumn ; make sure solver starts at the beginning of the maze
     CLC
     ASL
     ASL
@@ -672,6 +677,7 @@ loop:
 
         LDA #29
         STA player_row
+        sta solving_row ; make sure the solving algorithm also starts at the players row
         LDA temp
         STA player_collumn
 
@@ -682,6 +688,7 @@ loop:
         ASL
         STA player_y
         LDA player_collumn
+        sta solving_collumn ; make sure the solving algorithm also starts at the players collumn
         CLC
         ASL
         ASL
@@ -888,4 +895,497 @@ loop:
         ;neither up, down, left, or right is pressed
     RTS
 .endproc
+
+;****************************************************************
+;MAZE SOLVER
+;****************************************************************
+.proc left_hand_rule
+
+    ;-----------------------------------------------------------
+    ;CAP THE ROW AND COLLUMN
+    ;-----------------------------------------------------------
+    ; lda solving_row      
+    ; cmp #29              
+    ; bcc :+               ; Branch if value is less than or equal to 29 (Carry Clear)
+    ; lda #29              ; If value > 29, load 29 into the accumulator
+    ; dec solving_local_direction
+    ; sta solving_row 
+ 
+    ; :   
+    ; sta solving_row
+    ; cmp #0                ; Compare solving_row with 0
+    ; bcs :+                ; Branch if value is >= 0 (Carry Set)
+    ; lda #0          
+    ; dec solving_local_direction      ; If value < 0, load 0 into the accumulator
+    ; sta solving_row    
+
+    ; :
+    ; lda solving_collumn 
+    ; cmp #31              
+    ; bcc :+       
+    ; lda #31        
+    ; dec solving_local_direction      
+    ; sta solving_collumn 
+    ; :    
+    ; sta solving_collumn
+    ; cmp #0                ; Compare solving_row with 0
+    ; bcs value_ok               ; Branch if value is >= 0 (Carry Set)
+    ; lda #0          
+    ; dec solving_local_direction      ; If value < 0, load 0 into the accumulator
+    ; sta solving_collumn    
+
+
+
+    value_ok:
+
+
+    ;---------------------------------------------------------------------------------------------------------------------------
+    ;WHEN SOLVING, UPDATE PLAYER MOVEMENT OUTSIDE OF INPUT FROM PLAYER (WE SHOULD DISABLE THE PLAYER_UPDATE IN THIS MODE)
+    ;---------------------------------------------------------------------------------------------------------------------------
+    lda solving_row
+    sta player_row
+    asl            ; Multiply by 2 
+    asl            ; Multiply by 4 
+    asl            ; Multiply by 8 
+    sta player_y  ;set y position
+
+    lda solving_collumn
+    sta player_collumn
+    asl
+    asl
+    asl 
+    sta player_x ;set x position
+
+
+    ;----------------------------------------------------------
+    ;DRAW CELL
+    ;----------------------------------------------------------
+    add_to_changed_tiles_buffer solving_row, solving_collumn, #2 
+
+    ;----------------------------------------------------------
+    ;MAKE SURE LOCAL DIRECTION IS WITHIN RANGE 0-3
+    ;----------------------------------------------------------
+    lda solving_local_direction
+    cmp #$FF        ; Check if A went below 0 (will become $FF due to underflow)
+    bne SkipWrap    ; If not $FF, skip wrapping
+    lda #$03        ; Wrap around to 3 if A is $FF
+    sta solving_local_direction
+
+    SkipWrap:
+    ;solver_local_direction now contains a value between 0-3
+
+    ;---------------------------------------------------------
+    ;LOAD LOCAL DIRECTION OF TILE
+    ;---------------------------------------------------------
+    sta solving_local_direction ; direction is TOP
+    cmp #TOP_D
+    beq DIRECTION_IS_TOP
+    cmp #BOTTOM_D
+    beq dir_is_bottom_intermediate
+    cmp #RIGHT_D
+    beq dir_is_right_intermediate
+    cmp #LEFT_D
+    beq dir_is_left_intermediate
+
+    dir_is_right_intermediate :
+        jmp DIRECTION_IS_RIGHT ;intermediate jump cause of range error
+    dir_is_left_intermediate :
+        jmp DIRECTION_IS_LEFT ;intermediate jump cause of range error
+    dir_is_bottom_intermediate : 
+        jmp DIRECTION_IS_BOTTOM ; intermediate jump cause of range error
+
+        
+    ;**********************
+    ;MAIN ALGORITHM START
+    ;**********************
+    DIRECTION_IS_TOP: 
+    ;---------------------------------------
+    ;CHECK LEFT TILE
+    ;---------------------------------------
+        lda solving_collumn
+        sec 
+        sbc #1 ;tile to the left is current collumn - 1
+        sta temp_solving_collumn
+
+        get_map_tile_state solving_row, temp_solving_collumn ; a register now holds passable (!0) or non passable (0)
+
+        bne :+                           ; Branch to the intermediate jump if Z flag is not set
+        jmp AFTER_BRANCH4            ; If Z flag is set, skip the jump and continue here
+        :
+        jmp LEFT_TILE_IS_PASSABLE_REL_TOP
+        AFTER_BRANCH4:
+        ;-------------------------------------------------------
+        ;LEFT TILE NOT PASSABLE, CHECK IF WE CAN MOVE FORWARDS
+        ;------------------------------------------------------
+            lda solving_row
+            sec 
+            sbc #1 ;tile to the top is row - 1
+            sta temp_solving_row; rotate local direction to the left
+            get_map_tile_state temp_solving_row, solving_collumn ; a register now holds passable (!0) or non passable (0)
+
+            bne FORWARDS_TOP_PASSABLE
+            ;---------------------------------------------------------------
+            ;MOVING FORWARDS NOT POSSIBLE, SO WE CHECK IF RIGHT IS POSSIBLE
+            ;---------------------------------------------------------------
+            moving_forward_not_possible_row: 
+                lda solving_collumn
+                clc
+                adc #1 ;tile to the right is collumn + 1
+                sta temp_solving_collumn; 
+                get_map_tile_state solving_row, temp_solving_collumn ; a register now holds passable (!0) or non passable (0)
+
+                bne RIGHT_TOP_PASSABLE
+                    moving_right_not_possible: 
+                    ;---------------------------------
+                    ;RIGHT NOT POSSIBLE, SO WE ROTATE
+                    ;---------------------------------
+                    dec solving_local_direction
+                    rts
+
+                RIGHT_TOP_PASSABLE:
+                    ;--------------------------------
+                    ;RIGHT POSSIBLE, SO MOVE RIGHT
+                    ;--------------------------------
+                    LDA solving_collumn        ; Load the value of solving_collumn
+                    CMP #31                   ; Compare solving_collumn with 31
+                    BEQ SkipMoveRight         ; If it's 31, skip the increment
+
+                    INC solving_collumn        ; Increment solving_collumn (move right)
+                    LDA #RIGHT_D              ; Update the local direction to RIGHT
+                    STA solving_local_direction
+                    RTS                        ; Return from subroutine
+
+                SkipMoveRight:
+                ; MOVING RIGHT IS NOT POSSIBLE
+                    jmp moving_right_not_possible
+                     
+
+            FORWARDS_TOP_PASSABLE: 
+            ;----------------------------------------------
+            ;MOVING FORWARDS IS POSSIBLE, SO WE DO
+            ;----------------------------------------------
+
+                
+                LDA solving_row            ; Load the value of solving_row
+                BEQ SkipMoveForwardRow        ; If solving_row is 0, skip the decrement
+
+                DEC solving_row            ; Decrement solving_row (move forward)
+                LDA #TOP_D                 ; Update the local direction to TOP
+                STA solving_local_direction
+                RTS                        ; Return from subroutine
+
+                SkipMoveForwardRow:
+                ; MOVING FORWARD NOT POSSIBLE
+                jmp moving_forward_not_possible_row
+
+        LEFT_TILE_IS_PASSABLE_REL_TOP: 
+        ;----------------------------------------------
+        ;LEFT TILE IS PASSABLE, SO WE MOVE LEFT
+        ;----------------------------------------------
+
+            LDA solving_collumn        ; Load the value of solving_collumn
+            BEQ SkipMoveLeft           ; If solving_collumn is 0, skip the decrement
+
+            DEC solving_collumn        ; Decrement solving_collumn (move left)
+            LDA #LEFT_D                ; Update the local direction to LEFT
+            STA solving_local_direction
+            RTS                        ; Return from subroutine
+
+        SkipMoveLeft:
+            ;LEFT TILE IS NOT PASSABLE
+            jmp AFTER_BRANCH4
+    DIRECTION_IS_BOTTOM: 
+    ;----------------------------------------
+    ;CHECK LEFT TILE
+    ;----------------------------------------
+
+    ;relative to rasterspace it is the right tile
+        lda solving_collumn
+        clc 
+        adc #1 ;tile to the left is current collum + 1
+        sta temp_solving_collumn
+        get_map_tile_state solving_row, temp_solving_collumn ;passable (non zero) non passable (0)
+
+
+       
+        bne :+                           ; Branch to the intermediate jump if Z flag is not set
+        jmp AFTER_BRANCH3             ; If Z flag is set, skip the jump and continue here
+        :
+        jmp LEFT_TILE_PASSABLE_REL_BOTTOM
+        AFTER_BRANCH3:
+        ;-------------------------------------------------------
+        ;LEFT TILE NOT PASSABLE, CHECK IF WE CAN MOVE FORWARDS
+        ;------------------------------------------------------
+            lda solving_row
+            clc 
+            adc #1 ;tile to the bottom is row + 1
+            sta temp_solving_row; rotate local direction to the left
+            get_map_tile_state temp_solving_row, solving_collumn ; a register now holds passable (!0) or non passable (0)
+
+            bne FORWARDS_BOTTOM_PASSABLE
+           ;---------------------------------------------------------------
+            ;MOVING FORWARDS NOT POSSIBLE, SO WE CHECK IF RIGHT IS POSSIBLE
+            ;---------------------------------------------------------------
+            moving_forward_not_possible_row2: 
+                lda solving_collumn
+                sec
+                sbc #1 
+                sta temp_solving_collumn; 
+                get_map_tile_state solving_row, temp_solving_collumn ; a register now holds passable (!0) or non passable (0)
+
+                bne RIGHT_BOTTOM_PASSABLE
+                    ;---------------------------------
+                    ;RIGHT NOT POSSIBLE, SO WE ROTATE
+                    ;---------------------------------
+                    right_not_possible: 
+                    dec solving_local_direction
+                    rts
+
+                RIGHT_BOTTOM_PASSABLE:
+                    ;--------------------------------
+                    ;RIGHT POSSIBLE, SO MOVE RIGHT
+                    ;--------------------------------
+
+                    LDA solving_collumn        ; Load the value of solving_collumn
+                    BEQ SkipMoveLeft1           ; If solving_collumn is 0, skip the decrement
+
+                    DEC solving_collumn        ; Decrement solving_collumn (move left)
+                    LDA #LEFT_D                ; Update the local direction to LEFT
+                    STA solving_local_direction
+                    RTS                        ; Return from subroutine
+
+                SkipMoveLeft1:
+                    ;RIGHT NOT POSSIBLE
+                    jmp right_not_possible
+
+            FORWARDS_BOTTOM_PASSABLE: 
+            ;----------------------------------------------
+            ;MOVING FORWARDS IS POSSIBLE, SO WE DO
+            ;----------------------------------------------
+
+            LDA solving_row            ; Load the value of solving_row
+            CMP #29                   ; Compare solving_row with 29
+            BEQ SkipMoveDown        ; If solving_row is 29, skip the increment
+
+            INC solving_row            ; Increment solving_row (move down)
+            LDA #BOTTOM_D             ; Update the local direction to BOTTOM
+            STA solving_local_direction
+            RTS                        ; Return from subroutine
+
+            SkipMoveDown:
+            ;MOVING FORWARDS NOT POSSIBLE
+            jmp moving_forward_not_possible_row2
+
+
+    LEFT_TILE_PASSABLE_REL_BOTTOM: 
+    ;-----------------------------------------------
+    ;LEFT TILE IS PASSABLE, SO WE MOVE THERE
+    ;-----------------------------------------------
+            LDA solving_collumn        ; Load the value of solving_collumn
+            CMP #31                   ; Compare solving_collumn with 31
+            BEQ SkipMoveRight1         ; If it's 31, skip the increment
+
+            INC solving_collumn        ; Increment solving_collumn (move right)
+            LDA #RIGHT_D              ; Update the local direction to RIGHT
+            STA solving_local_direction
+            RTS                        ; Return from subroutine
+
+            SkipMoveRight1:
+                ;LEFT TILE NOT PASSABLE
+                jmp AFTER_BRANCH3
+
+    DIRECTION_IS_RIGHT: 
+    ;if direction is right then check top tile
+        lda solving_row
+        sec
+        sbc #1
+        sta temp_solving_row
+
+        get_map_tile_state temp_solving_row, solving_collumn ;passable (0) non passable (!0)
+
+        bne :+                          
+        jmp AFTER_BRANCH2             
+        :
+        jmp LEFT_TILE_PASSABLE_REL_RIGHT
+        AFTER_BRANCH2:
+        ;-------------------------------------------------------
+        ;LEFT TILE NOT PASSABLE, CHECK IF WE CAN MOVE FORWARDS
+        ;------------------------------------------------------
+            lda solving_collumn
+            clc 
+            adc #1 ;tile to the top is row - 1
+            sta temp_solving_collumn; rotate local direction to the left
+            get_map_tile_state solving_row, temp_solving_collumn ; a register now holds passable (!0) or non passable (0)
+
+            bne FORWARDS_RIGHT_PASSABLE
+            moving_forward_not_possible1: 
+            ;---------------------------------------------------------------
+            ;MOVING FORWARDS NOT POSSIBLE, SO WE CHECK IF RIGHT IS POSSIBLE
+            ;---------------------------------------------------------------
+                lda solving_row
+                clc
+                adc #1 ;tile to the right is collumn + 1
+                sta temp_solving_row; 
+                get_map_tile_state temp_solving_row, solving_collumn ; a register now holds passable (!0) or non passable (0)
+
+                bne RIGHT_RIGHT_PASSABLE
+                    ;---------------------------------
+                    ;RIGHT NOT POSSIBLE, SO WE ROTATE
+                    ;---------------------------------
+                    right_not_possible3:
+                    dec solving_local_direction
+                    rts
+
+                RIGHT_RIGHT_PASSABLE:
+                    ;--------------------------------
+                    ;RIGHT POSSIBLE, SO MOVE RIGHT
+                    ;--------------------------------
+                    LDA solving_row          
+                    CMP #29                   
+                    BEQ SkipMoveDown2          
+
+                    INC solving_row            
+                    LDA #BOTTOM_D             
+                    STA solving_local_direction
+                    RTS                        
+
+                SkipMoveDown2:
+                    ; RIGHT NOT POSSIBLE 
+                    jmp right_not_possible3
+
+            FORWARDS_RIGHT_PASSABLE: 
+            ;----------------------------------------------
+            ;MOVING FORWARDS IS POSSIBLE, SO WE DO
+            ;----------------------------------------------
+
+                LDA solving_collumn        ; Load the value of solving_collumn
+                CMP #31                   ; Compare solving_collumn with 31
+                BEQ SkipMoveRight2         ; If it's 31, skip the increment
+
+                INC solving_collumn        ; Increment solving_collumn (move right)
+                LDA #RIGHT_D              ; Update the local direction to RIGHT
+                STA solving_local_direction
+                RTS                        ; Return from subroutine
+
+            SkipMoveRight2:
+             ; MOVING FORWARD IS NOT POSSIBLE 
+             jmp moving_forward_not_possible1
+
+        LEFT_TILE_PASSABLE_REL_RIGHT: 
+            ;---------------------------------
+            ;LEFT TILE PASSABLE
+            ;---------------------------------
+            ;move left relative to direction (up in rasterspace)
+
+            LDA solving_row            ; Load the value of solving_row
+            BEQ SkipMoveForwardRow2        ; If solving_row is 0, skip the decrement
+
+            DEC solving_row            ; Decrement solving_row (move forward)
+            LDA #TOP_D                 ; Update the local direction to TOP
+            STA solving_local_direction
+            RTS                        ; Return from subroutine
+
+        SkipMoveForwardRow2:
+        ; LEFT TILE NOT PASSABLE
+            jmp AFTER_BRANCH2
+
+    DIRECTION_IS_LEFT: 
+    ;if direction is left then check bottom tile
+        lda solving_row
+        clc
+        adc #1
+        sta temp_solving_row
+
+        get_map_tile_state temp_solving_row, solving_collumn ; passable(0) non passable(!0)
+
+        bne :+                          
+        jmp AFTER_BRANCH             
+        :
+        jmp LEFT_TILE_PASSABLE_REL_LEFT 
+        AFTER_BRANCH:
+        ;-------------------------------------------------------
+        ;LEFT TILE NOT PASSABLE, CHECK IF WE CAN MOVE FORWARDS
+        ;------------------------------------------------------
+            lda solving_collumn
+            sec 
+            sbc #1 ;tile to the top is col - 1
+            sta temp_solving_collumn; rotate local direction to the left
+            get_map_tile_state solving_row, temp_solving_collumn ; a register now holds passable (!0) or non passable (0)
+
+            bne FORWARDS_LEFT_PASSABLE
+            moving_forward_not_possible:
+            ;---------------------------------------------------------------
+            ;MOVING FORWARDS NOT POSSIBLE, SO WE CHECK IF RIGHT IS POSSIBLE
+            ;---------------------------------------------------------------
+                lda solving_row
+                sec
+                sbc #1 
+                sta temp_solving_row; 
+                get_map_tile_state temp_solving_row, solving_collumn ; a register now holds passable (!0) or non passable (0)
+
+                bne RIGHT_LEFT_PASSABLE
+                    ;---------------------------------
+                    ;RIGHT NOT POSSIBLE, SO WE ROTATE
+                    ;---------------------------------
+                    right_not_possible2:
+                    dec solving_local_direction
+                    rts
+
+                RIGHT_LEFT_PASSABLE:
+                    ;--------------------------------
+                    ;RIGHT POSSIBLE, SO MOVE RIGHT
+                    ;--------------------------------
+                    
+                    LDA solving_row            ; Load the value of solving_row
+                    BEQ SkipMoveForwardRow3        ; If solving_row is 0, skip the decrement
+
+                    DEC solving_row            ; Decrement solving_row (move forward)
+                    LDA #TOP_D                 ; Update the local direction to TOP
+                    STA solving_local_direction
+                    RTS                        ; Return from subroutine
+
+                    SkipMoveForwardRow3:
+                    ;RIGHT NOT POSSIBLE
+                    jmp right_not_possible2
+            FORWARDS_LEFT_PASSABLE: 
+            ;----------------------------------------------
+            ;MOVING FORWARDS IS POSSIBLE, SO WE DO
+            ;----------------------------------------------
+
+                LDA solving_collumn        ; Load the value of solving_collumn
+                BEQ SkipMoveLeft2           ; If solving_collumn is 0, skip the decrement
+
+                DEC solving_collumn        ; Decrement solving_collumn (move left)
+                LDA #LEFT_D                ; Update the local direction to LEFT
+                STA solving_local_direction
+                RTS                        ; Return from subroutine
+
+        SkipMoveLeft2:
+                ;MOVING FORWARDS NOT POSSIBLE
+                jmp moving_forward_not_possible
+
+        LEFT_TILE_PASSABLE_REL_LEFT:
+            ;--------------------------- 
+            ;LEFT TILE PASSABLE
+            ;----------------------------
+            ;move left relative to direction (bottom in rasterspace)
+            LDA solving_row            ; Load the value of solving_row
+            CMP #29                   ; Compare solving_row with 29
+            BEQ SkipMoveDown3          ; If solving_row is 29, skip the increment
+
+            INC solving_row            
+            LDA #BOTTOM_D             
+            STA solving_local_direction
+            RTS                        ;
+
+            SkipMoveDown3:
+            ; LEFT TILE NOT PASSABLE
+            jmp AFTER_BRANCH
+
+
+
+
+.endproc
+
+
 ;*****************************************************************
